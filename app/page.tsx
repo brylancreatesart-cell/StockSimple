@@ -3,8 +3,6 @@
 import { useMemo, useRef, useState } from 'react'
 
 type Line = { description: string; itemNumber: string; location: string; quantity: string; confidence?: number; needsReview?: boolean }
-
-const REVIEW_THRESHOLD = 0.95
 const emptyLine = (): Line => ({ description: '', itemNumber: '', location: '', quantity: '' })
 const transactionTypes = ['', 'Miscellaneous Issue', 'Issue to Project', 'Inventory Transfer', 'Issue to Conversion']
 
@@ -70,10 +68,10 @@ export default function Home() {
       setTransactionType(transactionTypes.includes(result.transactionType) ? result.transactionType : '')
       setNotes(result.remarks || ''); setTakenBy(result.receivedReturnedBy || ''); setPreparedBy(result.preparedBy || ''); setApprovedBy(result.approvedBy || '')
       const extractedLines: Line[] = Array.isArray(result.lines) && result.lines.length
-        ? result.lines.map((line: { description?: string; itemNumber?: string; location?: string; quantity?: string; ocrConfidence?: number; needsReview?: boolean }) => {
-            const confidence = typeof line.ocrConfidence === 'number' ? line.ocrConfidence : undefined
-            return { description: line.description || '', itemNumber: line.itemNumber || '', location: line.location || '', quantity: line.quantity || '', confidence, needsReview: confidence !== undefined ? confidence < REVIEW_THRESHOLD : Boolean(line.needsReview) }
-          })
+        ? result.lines.map((line: { description?: string; itemNumber?: string; location?: string; quantity?: string; ocrConfidence?: number; needsReview?: boolean }) => ({
+            description: line.description || '', itemNumber: line.itemNumber || '', location: line.location || '', quantity: line.quantity || '', confidence: typeof line.ocrConfidence === 'number' ? line.ocrConfidence : undefined,
+            needsReview: Boolean(line.needsReview)
+          }))
         : [emptyLine()]
       setLines(extractedLines); enterReview()
     } catch (error) { setOcrError(error instanceof Error ? error.message : 'Unable to read the stock sheet.') }
@@ -121,7 +119,7 @@ export default function Home() {
         </section>
       ) : (
         <section className="card review-card">
-          <div className="row"><div><h2 style={{ marginBottom: 4 }}>Review before approval</h2><div className="muted">Only lines below 95% OCR confidence require review.</div></div><div className="spacer" /><span className={`status ${reviewWarnings ? 'warning' : 'success'}`}>{reviewWarnings ? `${reviewWarnings} line${reviewWarnings === 1 ? '' : 's'} need attention` : 'Ready for approval'}</span></div>
+          <div className="row"><div><h2 style={{ marginBottom: 4 }}>Review before approval</h2><div className="muted">Only lines with a specific readability or placement problem require review.</div></div><div className="spacer" /><span className={`status ${reviewWarnings ? 'warning' : 'success'}`}>{reviewWarnings ? `${reviewWarnings} line${reviewWarnings === 1 ? '' : 's'} need attention` : 'Ready for approval'}</span></div>
           <div className="review-layout">
             <div>{preview && <img className="preview review-preview" src={preview} alt="Original stock sheet" />}</div>
             <div>
