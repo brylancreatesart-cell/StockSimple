@@ -46,26 +46,55 @@ const schema = {
   required: ['costCenter', 'afe', 'transactionType', 'remarks', 'receivedReturnedBy', 'preparedBy', 'approvedBy', 'lines']
 }
 
-const extractionPrompt = `You are extracting handwriting from a Stores Issue Document.
+const extractionPrompt = `You are a high-accuracy document vision system extracting a handwritten Stores Issue Document. Accuracy of row/column placement is more important than guessing a value.
 
-The printed form has these fixed regions:
+FIRST, understand the physical form before transcribing it. Locate the printed field boundaries, table grid, handwritten marks, and checkbox area. Then perform a second visual pass to transcribe the handwriting. Mentally cross-check every extracted table row against the original image before returning the result.
+
+FIXED FORM REGIONS:
 - COST CENTER
 - AFE
 - TRANSACTION TYPE with four checkbox choices: Miscellaneous Issue, Issue to Project, Inventory Transfer, Issue to Conversion
-- A large inventory table with columns exactly: DESCRIPTION, ITEM NO., LOCATOR, QUANTITY
+- INVENTORY TABLE with columns, left-to-right: DESCRIPTION, ITEM NO., LOCATOR, QUANTITY
 - REMARKS/NOTES
 - RECEIVED/RETURNED BY
 - PREPARED BY
 - APPROVED
 
-Read only handwriting or other user-entered marks. Do not copy the printed labels into values.
-Use the table grid to keep each handwritten value in its own column and row. Never move a value from one column into another.
-Ignore blank table rows. Preserve item numbers, locators, punctuation, and leading zeros exactly when legible.
-For quantity, return the visible number as a string; do not invent units or quantities.
-For the transaction type, select the option that is actually checked. If no option is clearly checked, return an empty string.
-Do not guess missing handwriting. Empty or unreadable fields should be empty strings.
+CRITICAL TABLE RULES:
+- Treat every horizontal table row as an independent record.
+- Treat the four table columns as strict vertical regions. A mark belongs to the column whose cell contains it, not the nearest readable text elsewhere.
+- Never shift a value into a neighboring column just because the handwriting is easier to read there.
+- Keep values on the same physical row together. Never combine handwriting from different rows.
+- Ignore completely blank rows.
+- If handwriting crosses a grid line, use the writer's apparent intended cell only when that is visually clear; otherwise leave the affected value empty and set needsReview true.
+- Preserve item numbers, locators, punctuation, capitalization, and leading zeros exactly when legible.
+- For QUANTITY, transcribe only the visible number as a string. Do not add units, arithmetic, or inferred quantities.
 
-Confidence is your confidence that the extracted value is correct. Use a lower confidence when handwriting is ambiguous, blurry, crossed out, partially outside a cell, or otherwise uncertain. Set needsReview true whenever confidence is below 0.85 or the value is ambiguous.`
+HANDWRITING RULES:
+- Read handwriting and user-entered marks only. Never copy printed labels into extracted values.
+- Do not guess. If a character or word is genuinely unreadable, return the portion you can confidently read only if it remains unambiguous; otherwise return an empty string.
+- Do not silently correct spelling or normalize identifiers.
+- Distinguish digits from letters using the surrounding field and writing context, but never invent a character.
+- For checkboxes, identify the actual visible check, X, mark, or selection. Do not infer a transaction type from other fields.
+- If no transaction option is clearly selected, return an empty string.
+- Pay special attention to visually similar characters such as 0/O, 1/I, 2/Z, 5/S, 6/G, 8/B, and 9/g. Preserve what is actually visible rather than choosing a prettier value.
+
+CONFIDENCE:
+- ocrConfidence is the confidence that the entire extracted line is correct, including row and column placement.
+- Lower confidence for blurry, faint, crossed-out, cramped, partially obscured, ambiguous, or unusually shaped handwriting.
+- Set needsReview true whenever any value on the line is ambiguous, any column/row placement is uncertain, or confidence is below 0.85.
+- Do not use high confidence merely because a plausible value can be guessed from context.
+
+FINAL CHECK BEFORE RETURNING:
+1. Count the nonblank handwritten table rows.
+2. Verify each extracted line corresponds to exactly one physical table row.
+3. Verify each value stayed in its original column.
+4. Verify quantities are not accidentally copied from item numbers or locators.
+5. Verify leading zeros and identifiers were preserved.
+6. Verify checkbox selection from the visible mark.
+7. Verify every uncertain line is flagged for review.
+
+Return only the requested structured data.`
 
 function extractOutputText(result: any): string {
   if (typeof result?.output_text === 'string' && result.output_text.trim()) {
