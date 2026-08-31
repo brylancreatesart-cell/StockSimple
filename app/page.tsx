@@ -29,6 +29,7 @@ export default function Home() {
       return next.type.startsWith('image/') ? URL.createObjectURL(next) : null
     })
     setSaveError('')
+    setSavedId('')
   }
 
   function updateLine(index: number, key: keyof Line, value: string) {
@@ -39,15 +40,20 @@ export default function Home() {
   function removeLine(index: number) { setLines((current) => current.length === 1 ? current : current.filter((_, i) => i !== index)) }
 
   async function approveAndSave() {
+    if (!file) return
     setSaving(true)
     setSaveError('')
     setSavedId('')
     try {
-      const response = await fetch('/api/stock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ company, project, takenBy, notes, sourceFileName: file?.name, lines }),
-      })
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('company', company)
+      formData.append('project', project)
+      formData.append('takenBy', takenBy)
+      formData.append('notes', notes)
+      formData.append('lines', JSON.stringify(lines))
+
+      const response = await fetch('/api/stock', { method: 'POST', body: formData })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Unable to save the stock record.')
       setSavedId(result.id)
@@ -79,7 +85,7 @@ export default function Home() {
           <div className="drop"><input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" capture="environment" onChange={(e) => chooseFile(e.target.files?.[0])} />{preview && <img className="preview" src={preview} alt="Stock sheet preview" />}{file && <p className="muted">{file.name}</p>}</div>
           <div className="divider" /><div className="row"><h3 style={{ margin: 0 }}>2. Stock lines</h3><div className="spacer" /><button className="secondary" type="button" onClick={addLine}>+ Add line</button></div>
           {lines.map((line, index) => <div className="line" key={index}><div className="row"><strong>Line {index + 1}</strong><div className="spacer" /><button className="secondary" type="button" onClick={() => removeLine(index)}>Remove</button></div><div className="grid grid2" style={{ marginTop: 10 }}><label>Item description<input value={line.description} onChange={(e) => updateLine(index, 'description', e.target.value)} /></label><label>Item number<input value={line.itemNumber} onChange={(e) => updateLine(index, 'itemNumber', e.target.value)} /></label><label>Location<input value={line.location} onChange={(e) => updateLine(index, 'location', e.target.value)} /></label><label>Quantity<input type="number" min="0" step="1" inputMode="numeric" value={line.quantity} onChange={(e) => updateLine(index, 'quantity', e.target.value)} /></label></div></div>)}
-          <div className="row" style={{ marginTop: 16 }}><div className="muted">OCR will populate these fields later; you will still review them before approval.</div><div className="spacer" /><button className="button" disabled={!canReview} onClick={() => setStage('review')}>Continue to review</button></div>
+          <div className="row" style={{ marginTop: 16 }}><div className="muted">The original sheet will be securely stored with the approved record.</div><div className="spacer" /><button className="button" disabled={!canReview} onClick={() => setStage('review')}>Continue to review</button></div>
         </section>
       ) : (
         <section className="card">
