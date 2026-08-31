@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from 'react'
 
 type Line = { description: string; itemNumber: string; location: string; quantity: string; confidence?: number; needsReview?: boolean }
 
+const REVIEW_THRESHOLD = 0.95
 const emptyLine = (): Line => ({ description: '', itemNumber: '', location: '', quantity: '' })
 const transactionTypes = ['', 'Miscellaneous Issue', 'Issue to Project', 'Inventory Transfer', 'Issue to Conversion']
 
@@ -58,36 +59,23 @@ export default function Home() {
 
   async function readPaperSheet() {
     if (!file) return
-    if (file.type === 'application/pdf') {
-      setOcrError('For handwriting extraction, please use a photo (JPG, PNG, or WEBP) of the sheet.')
-      return
-    }
+    if (file.type === 'application/pdf') { setOcrError('For handwriting extraction, please use a photo (JPG, PNG, or WEBP) of the sheet.'); return }
     setReading(true); setOcrError(''); setSaveError(''); setSavedId('')
     try {
-      const formData = new FormData()
-      formData.append('file', file)
+      const formData = new FormData(); formData.append('file', file)
       const response = await fetch('/api/stock/extract', { method: 'POST', body: formData })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error || 'Unable to read the stock sheet.')
-      setCostCenter(result.costCenter || '')
-      setAfe(result.afe || '')
+      setCostCenter(result.costCenter || ''); setAfe(result.afe || '')
       setTransactionType(transactionTypes.includes(result.transactionType) ? result.transactionType : '')
-      setNotes(result.remarks || '')
-      setTakenBy(result.receivedReturnedBy || '')
-      setPreparedBy(result.preparedBy || '')
-      setApprovedBy(result.approvedBy || '')
+      setNotes(result.remarks || ''); setTakenBy(result.receivedReturnedBy || ''); setPreparedBy(result.preparedBy || ''); setApprovedBy(result.approvedBy || '')
       const extractedLines: Line[] = Array.isArray(result.lines) && result.lines.length
-        ? result.lines.map((line: { description?: string; itemNumber?: string; location?: string; quantity?: string; ocrConfidence?: number; needsReview?: boolean }) => ({
-            description: line.description || '',
-            itemNumber: line.itemNumber || '',
-            location: line.location || '',
-            quantity: line.quantity || '',
-            confidence: typeof line.ocrConfidence === 'number' ? line.ocrConfidence : undefined,
-            needsReview: Boolean(line.needsReview),
-          }))
+        ? result.lines.map((line: { description?: string; itemNumber?: string; location?: string; quantity?: string; ocrConfidence?: number; needsReview?: boolean }) => {
+            const confidence = typeof line.ocrConfidence === 'number' ? line.ocrConfidence : undefined
+            return { description: line.description || '', itemNumber: line.itemNumber || '', location: line.location || '', quantity: line.quantity || '', confidence, needsReview: confidence !== undefined ? confidence < REVIEW_THRESHOLD : Boolean(line.needsReview) }
+          })
         : [emptyLine()]
-      setLines(extractedLines)
-      enterReview()
+      setLines(extractedLines); enterReview()
     } catch (error) { setOcrError(error instanceof Error ? error.message : 'Unable to read the stock sheet.') }
     finally { setReading(false) }
   }
@@ -133,7 +121,7 @@ export default function Home() {
         </section>
       ) : (
         <section className="card review-card">
-          <div className="row"><div><h2 style={{ marginBottom: 4 }}>Review before approval</h2><div className="muted">Fix only what needs fixing, then approve.</div></div><div className="spacer" /><span className={`status ${reviewWarnings ? 'warning' : 'success'}`}>{reviewWarnings ? `${reviewWarnings} line${reviewWarnings === 1 ? '' : 's'} need attention` : 'Ready for approval'}</span></div>
+          <div className="row"><div><h2 style={{ marginBottom: 4 }}>Review before approval</h2><div className="muted">Only lines below 95% OCR confidence require review.</div></div><div className="spacer" /><span className={`status ${reviewWarnings ? 'warning' : 'success'}`}>{reviewWarnings ? `${reviewWarnings} line${reviewWarnings === 1 ? '' : 's'} need attention` : 'Ready for approval'}</span></div>
           <div className="review-layout">
             <div>{preview && <img className="preview review-preview" src={preview} alt="Original stock sheet" />}</div>
             <div>
