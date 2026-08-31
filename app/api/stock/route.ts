@@ -126,7 +126,13 @@ export async function POST(request: Request) {
         auth: { autoRefreshToken: false, persistSession: false },
       })
       if (storagePath) await supabase.storage.from('stock-sheets').remove([storagePath]).catch(() => undefined)
-      if (documentId) await supabase.from('stock_documents').delete().eq('id', documentId).catch(() => undefined)
+      if (documentId) {
+        try {
+          await supabase.from('stock_documents').delete().eq('id', documentId)
+        } catch {
+          // Preserve the original save failure when cleanup fails.
+        }
+      }
     }
 
     return NextResponse.json({ error: 'Unable to save the stock record.' }, { status: 500 })
