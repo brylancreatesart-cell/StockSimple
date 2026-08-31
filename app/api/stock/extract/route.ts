@@ -27,17 +27,13 @@ const schema = {
 
 const basePrompt = `Extract this handwritten Stores Issue Document. Understand the printed form and table grid first, then transcribe only handwritten values. Never guess. Preserve exact visible identifiers, leading zeros, spelling and quantities. Inventory columns are DESCRIPTION, ITEM NO., LOCATOR, QUANTITY and physical row/column placement must be preserved. Ignore blank rows. For checkboxes, select only an actually visible mark. Pay special attention to 0/O, 1/I/l, 2/Z, 5/S, 6/G, 8/B and 9/g.
 
-For each inventory line, needsReview is the primary human-review decision. Set needsReview=true ONLY when there is a concrete visual reason a human should inspect the line: an ambiguous character, incomplete handwriting, blur/occlusion, crossed-out content, or uncertain row/column placement. Clearly readable handwriting in the correct cell must have needsReview=false even if the handwriting style is informal.
-
-ocrConfidence is a user-facing calibrated score that must agree with needsReview. For a clearly readable, complete, correctly placed line with needsReview=false, use 0.95-1.00. For a line with a concrete visual problem and needsReview=true, use a score below 0.95. Do not assign low scores merely because mathematical certainty is impossible. Never inflate a genuinely ambiguous line just to avoid review.
+Do not use a numeric confidence score to decide review. For this first pass, needsReview should identify only a concrete visual problem: ambiguous character, incomplete handwriting, blur/occlusion, crossed-out content, or uncertain row/column placement. Clearly readable handwriting in the correct cell should be false. Return your best transcription and do not invent missing values.
 
 Return only the requested structured data.`
 
 const verificationPrompt = `Quality-control the handwritten Stores Issue Document against the ORIGINAL IMAGE. Independently verify every field and inventory row, correcting the draft only when the image supports it. Never guess. Preserve physical row/column placement, exact identifiers, leading zeros and visible quantities. Check 0/O, 1/I/l, 2/Z, 5/S, 6/G, 8/B and 9/g.
 
-For every inventory line, decide needsReview from concrete visual evidence only. Set it true only when a human should actually inspect the line because of ambiguous characters, incomplete handwriting, blur/occlusion, crossed-out content, or uncertain physical row/column placement. A clearly readable line in the correct cell must be needsReview=false.
-
-ocrConfidence must be calibrated to that decision: needsReview=false means 0.95-1.00; needsReview=true means below 0.95. Do not systematically score correct readable handwriting at 0.86-0.90. The score is a review-routing signal, not a generic model-confidence estimate.
+For this verification pass, needsReview should be true ONLY if the ORIGINAL IMAGE contains a concrete visual problem that a human must resolve: ambiguous characters, incomplete handwriting, blur/occlusion, crossed-out content, or uncertain physical row/column placement. Clearly readable, complete handwriting in the correct cell must be false. Ignore generic uncertainty. Do not mark a line for review merely because the model is not mathematically certain.
 
 Return only the corrected structured data matching the schema.`
 
@@ -65,17 +61,21 @@ async function callVision(apiKey: string, dataUrl: string, prompt: string, draft
   try { return JSON.parse(outputText) } catch { throw new Error('OpenAI extraction returned invalid JSON') }
 }
 
-function normalizeExtraction(extracted: any) {
-  const lines: ExtractedLine[] = Array.isArray(extracted?.lines) ? extracted.lines.map((line: ExtractedLine) => {
-    const needsReview = Boolean(line?.needsReview)
+function normalizeText(value: unknown) { return String(value ?? '').trim().replace(/\s+/g, ' ').toUpperCase() }
+function normalizeExtraction(extracted: any, reviewOverrides: boolean[] = []) {
+  const lines: ExtractedLine[] = Array.isArray(extracted?.lines) ? extracted.lines.map((line: ExtractedLine, index: number) => {
+    const needsReview = reviewOverrides[index] ?? Boolean(line?.needsReview)
     const raw = Math.max(0, Math.min(1, Number(line?.ocrConfidence) || 0))
-    const ocrConfidence = needsReview ? Math.min(raw, 0.94) : Math.max(raw, 0.95)
     return {
       description: String(line?.description || ''), itemNumber: String(line?.itemNumber || ''), location: String(line?.location || ''), quantity: String(line?.quantity || ''),
-      ocrConfidence, needsReview
+      ocrConfidence: needsReview ? Math.min(raw || 0.94, 0.94) : Math.max(raw, 0.95), needsReview
     }
   }) : []
   return { costCenter: String(extracted?.costCenter || ''), afe: String(extracted?.afe || ''), transactionType: ['Miscellaneous Issue','Issue to Project','Inventory Transfer','Issue to Conversion'].includes(extracted?.transactionType) ? extracted.transactionType : '', remarks: String(extracted?.remarks || ''), receivedReturnedBy: String(extracted?.receivedReturnedBy || ''), preparedBy: String(extracted?.preparedBy || ''), approvedBy: String(extracted?.approvedBy || ''), lines }
+}
+
+function lineSignature(line: any) {
+  return [line?.description, line?.itemNumber, line?.location, line?.quantity].map(normalizeText).join('|')
 }
 
 export async function POST(request: Request) {
@@ -87,10 +87,23 @@ export async function POST(request: Request) {
     if (!ALLOWED_TYPES.has(file.type)) return NextResponse.json({ error: 'For handwriting extraction, upload a JPG, PNG, or WEBP photo.' }, { status: 400 })
     if (file.size === 0 || file.size > MAX_FILE_SIZE) return NextResponse.json({ error: 'The stock sheet photo must be between 1 byte and 10 MB.' }, { status: 400 })
     const bytes = Buffer.from(await file.arrayBuffer()); const dataUrl = `data:${file.type};base64,${bytes.toString('base64')}`
+
     const firstPass = await callVision(apiKey, dataUrl, basePrompt)
     let finalPass = firstPass
-    try { finalPass = await callVision(apiKey, dataUrl, verificationPrompt, JSON.stringify(firstPass)) } catch (error) { console.error('Second-pass handwriting verification failed; using first pass', error) }
-    return NextResponse.json({ ...normalizeExtraction(finalPass), ocrSource: 'openai-vision-stores-issue-two-pass' })
+    let disagreement: boolean[] = []
+    try {
+      finalPass = await callVision(apiKey, dataUrl, verificationPrompt, JSON.stringify(firstPass))
+      const firstLines = Array.isArray(firstPass?.lines) ? firstPass.lines : []
+      const finalLines = Array.isArray(finalPass?.lines) ? finalPass.lines : []
+      const count = Math.max(firstLines.length, finalLines.length)
+      disagreement = Array.from({ length: count }, (_, index) => lineSignature(firstLines[index]) !== lineSignature(finalLines[index]))
+      for (let i = 0; i < finalLines.length; i++) {
+        finalLines[i].needsReview = Boolean(disagreement[i]) || Boolean(firstLines[i]?.needsReview) || Boolean(finalLines[i]?.needsReview)
+      }
+      finalPass.lines = finalLines
+    } catch (error) { console.error('Second-pass handwriting verification failed; using first pass', error) }
+
+    return NextResponse.json({ ...normalizeExtraction(finalPass, disagreement.length ? disagreement : undefined), ocrSource: 'openai-vision-stores-issue-two-pass-agreement' })
   } catch (error) {
     console.error('Handwriting extraction error', error); const message = error instanceof Error ? error.message : ''
     if (message.includes('OpenAI extraction')) return NextResponse.json({ error: 'The handwriting reader could not reliably process this photo. Try a clearer, straight-on photo.' }, { status: 502 })
