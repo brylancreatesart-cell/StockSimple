@@ -11,16 +11,18 @@ type Line = {
   needsReview?: boolean
 }
 
-type StockPayload = {
-  company?: string
-  project?: string
-  takenBy: string
-  notes?: string
-  sourceFileName?: string
-  lines: Line[]
+const MAX_FILE_SIZE = 10 * 1024 * 1024
+const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'application/pdf'])
+
+function safeFileName(name: string) {
+  const cleaned = name.trim().replace(/[^a-zA-Z0-9._-]+/g, '_')
+  return cleaned || 'stock-sheet'
 }
 
 export async function POST(request: Request) {
+  let documentId: string | null = null
+  let storagePath: string | null = null
+
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -29,9 +31,34 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Supabase server configuration is missing.' }, { status: 500 })
     }
 
-    const body = (await request.json()) as StockPayload
-    if (!body.takenBy?.trim() || !Array.isArray(body.lines) || body.lines.length === 0) {
-      return NextResponse.json({ error: 'Taken by and at least one stock line are required.' }, { status: 400 })
+    const formData = await request.formData()
+    const file = formData.get('file')
+    const takenBy = String(formData.get('takenBy') || '').trim()
+    const company = String(formData.get('company') || '').trim()
+    const project = String(formData.get('project') || '').trim()
+    const notes = String(formData.get('notes') || '').trim()
+    const linesRaw = String(formData.get('lines') || '[]')
+
+    if (!(file instanceof File)) {
+      return NextResponse.json({ error: 'A stock sheet file is required.' }, { status: 400 })
+    }
+    if (!ALLOWED_TYPES.has(file.type)) {
+      return NextResponse.json({ error: 'Unsupported stock sheet file type.' }, { status: 400 })
+    }
+    if (file.size === 0 || file.size > MAX_FILE_SIZE) {
+      return NextResponse.json({ error: 'Stock sheet must be between 1 byte and 10 MB.' }, { status: 400 })
+    }
+    if (!takenBy) {
+      return NextResponse.json({ error: 'Taken by is required.' }, { status: 400 })
+    }
+
+    let lines: Line[]
+    try {
+      const parsed = JSON.parse(linesRaw)
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('invalid lines')
+      lines = parsed
+    } catch {
+      return NextResponse.json({ error: 'Stock lines are invalid.' }, { status: 400 })
     }
 
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
@@ -41,11 +68,11 @@ export async function POST(request: Request) {
     const { data: document, error: documentError } = await supabase
       .from('stock_documents')
       .insert({
-        company: body.company?.trim() || null,
-        project: body.project?.trim() || null,
-        taken_by: body.takenBy.trim(),
-        notes: body.notes?.trim() || null,
-        source_file_name: body.sourceFileName || null,
+        company: company || null,
+        project: project || null,
+        taken_by: takenBy,
+        notes: notes || null,
+        source_file_name: file.name,
         status: 'approved',
         approved_at: new Date().toISOString(),
       })
@@ -53,8 +80,27 @@ export async function POST(request: Request) {
       .single()
 
     if (documentError) throw documentError
+    documentId = document.id
 
-    const items = body.lines.map((line, index) => ({
+    storagePath = `${document.id}/${safeFileName(file.name)}`
+    const fileBytes = Buffer.from(await file.arrayBuffer())
+    const { error: uploadError } = await supabase.storage
+      .from('stock-sheets')
+      .upload(storagePath, fileBytes, {
+        contentType: file.type,
+        upsert: false,
+      })
+
+    if (uploadError) throw uploadError
+
+    const { error: sourceUpdateError } = await supabase
+      .from('stock_documents')
+      .update({ source_file_url: storagePath })
+      .eq('id', document.id)
+
+    if (sourceUpdateError) throw sourceUpdateError
+
+    const items = lines.map((line, index) => ({
       document_id: document.id,
       line_number: index + 1,
       item_number: line.itemNumber?.trim() || null,
@@ -67,14 +113,22 @@ export async function POST(request: Request) {
     }))
 
     const { error: itemsError } = await supabase.from('stock_items').insert(items)
-    if (itemsError) {
-      await supabase.from('stock_documents').delete().eq('id', document.id)
-      throw itemsError
-    }
+    if (itemsError) throw itemsError
 
-    return NextResponse.json({ id: document.id, status: 'approved' })
+    return NextResponse.json({ id: document.id, status: 'approved', sourceFilePath: storagePath })
   } catch (error) {
     console.error('Stock save failed', error)
+
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (supabaseUrl && serviceRoleKey) {
+      const supabase = createClient(supabaseUrl, serviceRoleKey, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      })
+      if (storagePath) await supabase.storage.from('stock-sheets').remove([storagePath]).catch(() => undefined)
+      if (documentId) await supabase.from('stock_documents').delete().eq('id', documentId).catch(() => undefined)
+    }
+
     return NextResponse.json({ error: 'Unable to save the stock record.' }, { status: 500 })
   }
 }
