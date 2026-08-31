@@ -67,6 +67,24 @@ Do not guess missing handwriting. Empty or unreadable fields should be empty str
 
 Confidence is your confidence that the extracted value is correct. Use a lower confidence when handwriting is ambiguous, blurry, crossed out, partially outside a cell, or otherwise uncertain. Set needsReview true whenever confidence is below 0.85 or the value is ambiguous.`
 
+function extractOutputText(result: any): string {
+  if (typeof result?.output_text === 'string' && result.output_text.trim()) {
+    return result.output_text.trim()
+  }
+
+  const parts: string[] = []
+  for (const outputItem of Array.isArray(result?.output) ? result.output : []) {
+    if (outputItem?.type !== 'message') continue
+    for (const content of Array.isArray(outputItem.content) ? outputItem.content : []) {
+      if ((content?.type === 'output_text' || content?.type === 'text') && typeof content.text === 'string') {
+        parts.push(content.text)
+      }
+    }
+  }
+
+  return parts.join('').trim()
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey = process.env.OPENAI_API_KEY
@@ -123,12 +141,25 @@ export async function POST(request: Request) {
     }
 
     const result = await response.json()
-    const outputText = result.output_text
-    if (typeof outputText !== 'string' || !outputText.trim()) {
-      return NextResponse.json({ error: 'The handwriting reader returned no extracted information.' }, { status: 502 })
+    const outputText = extractOutputText(result)
+
+    if (!outputText) {
+      console.error('OpenAI extraction returned no text output', {
+        responseId: result?.id,
+        status: result?.status,
+        outputTypes: Array.isArray(result?.output) ? result.output.map((item: any) => item?.type) : [],
+      })
+      return NextResponse.json({ error: 'The handwriting reader returned no extracted information. Please try the photo again.' }, { status: 502 })
     }
 
-    const extracted = JSON.parse(outputText)
+    let extracted: any
+    try {
+      extracted = JSON.parse(outputText)
+    } catch (parseError) {
+      console.error('OpenAI extraction returned invalid JSON', { outputText, parseError })
+      return NextResponse.json({ error: 'The handwriting reader returned an unreadable result. Please try the photo again.' }, { status: 502 })
+    }
+
     const lines: ExtractedLine[] = Array.isArray(extracted.lines) ? extracted.lines.map((line: ExtractedLine) => ({
       description: String(line.description || ''),
       itemNumber: String(line.itemNumber || ''),
