@@ -1,13 +1,6 @@
 import { NextResponse } from 'next/server'
 
-type ExtractedLine = {
-  description: string
-  itemNumber: string
-  location: string
-  quantity: string
-  ocrConfidence: number
-  needsReview: boolean
-}
+type ExtractedLine = { description: string; itemNumber: string; location: string; quantity: string; ocrConfidence: number; needsReview: boolean }
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
@@ -25,17 +18,17 @@ const schema = {
   }, required: ['costCenter','afe','transactionType','remarks','receivedReturnedBy','preparedBy','approvedBy','lines']
 }
 
-const basePrompt = `Extract this handwritten Stores Issue Document. Understand the printed form and table grid first, then transcribe only handwritten values. Never guess. Preserve exact visible identifiers, leading zeros, spelling and quantities. Inventory columns are DESCRIPTION, ITEM NO., LOCATOR, QUANTITY and physical row/column placement must be preserved. Ignore blank rows. For checkboxes, select only an actually visible mark. Pay special attention to 0/O, 1/I/l, 2/Z, 5/S, 6/G, 8/B and 9/g.
+const extractionPrompt = `Extract this handwritten Stores Issue Document from the ORIGINAL IMAGE. Understand the printed form and table grid first, then transcribe only handwritten values. Never guess. Preserve exact visible identifiers, leading zeros, spelling and quantities. Inventory columns are DESCRIPTION, ITEM NO., LOCATOR, QUANTITY and physical row/column placement must be preserved. Ignore blank rows. For checkboxes, select only an actually visible mark. Pay special attention to 0/O, 1/I/l, 2/Z, 5/S, 6/G, 8/B and 9/g.
 
-Do not use a numeric confidence score to decide review. For this first pass, needsReview should identify only a concrete visual problem: ambiguous character, incomplete handwriting, blur/occlusion, crossed-out content, or uncertain row/column placement. Clearly readable handwriting in the correct cell should be false. Return your best transcription and do not invent missing values.
+Your job is transcription, not risk scoring. Return your best visually supported transcription. Do not invent missing values. Set needsReview to false; the application will independently determine review status by comparing separate visual readings. Set ocrConfidence to your internal estimate, but the application will not use it to decide review.
 
 Return only the requested structured data.`
 
-const verificationPrompt = `Quality-control the handwritten Stores Issue Document against the ORIGINAL IMAGE. Independently verify every field and inventory row, correcting the draft only when the image supports it. Never guess. Preserve physical row/column placement, exact identifiers, leading zeros and visible quantities. Check 0/O, 1/I/l, 2/Z, 5/S, 6/G, 8/B and 9/g.
+const verificationPrompt = `Independently transcribe this handwritten Stores Issue Document from the ORIGINAL IMAGE. Do NOT rely on or infer from another transcription. Read the physical form grid and every handwritten field yourself. Preserve exact visible identifiers, leading zeros, spelling, quantities, and row/column placement. Ignore blank rows. Pay special attention to 0/O, 1/I/l, 2/Z, 5/S, 6/G, 8/B and 9/g.
 
-For this verification pass, needsReview should be true ONLY if the ORIGINAL IMAGE contains a concrete visual problem that a human must resolve: ambiguous characters, incomplete handwriting, blur/occlusion, crossed-out content, or uncertain physical row/column placement. Clearly readable, complete handwriting in the correct cell must be false. Ignore generic uncertainty. Do not mark a line for review merely because the model is not mathematically certain.
+This is an independent second reading used for quality control. Return only what the ORIGINAL IMAGE visibly supports; never guess. Set needsReview to false because the application will compare this reading with another independent reading. Set ocrConfidence to your internal estimate, but the application will not use it to decide review.
 
-Return only the corrected structured data matching the schema.`
+Return only the requested structured data.`
 
 function extractOutputText(result: any): string {
   if (typeof result?.output_text === 'string' && result.output_text.trim()) return result.output_text.trim()
@@ -49,10 +42,9 @@ function extractOutputText(result: any): string {
   return parts.join('').trim()
 }
 
-async function callVision(apiKey: string, dataUrl: string, prompt: string, draft?: string) {
-  const inputText = draft ? `${prompt}\n\nFIRST-PASS DRAFT TO AUDIT:\n${draft}` : prompt
+async function callVision(apiKey: string, dataUrl: string, prompt: string) {
   const response = await fetch('https://api.openai.com/v1/responses', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({
-    model: 'gpt-5.6-luna', input: [{ role: 'user', content: [{ type: 'input_text', text: inputText }, { type: 'input_image', image_url: dataUrl, detail: 'high' }] }],
+    model: 'gpt-5.6-luna', input: [{ role: 'user', content: [{ type: 'input_text', text: prompt }, { type: 'input_image', image_url: dataUrl, detail: 'high' }] }],
     text: { format: { type: 'json_schema', name: 'stores_issue_document', strict: true, schema } }
   }) })
   if (!response.ok) { console.error('OpenAI extraction call failed', response.status, await response.text()); throw new Error('OpenAI extraction request failed') }
@@ -62,9 +54,10 @@ async function callVision(apiKey: string, dataUrl: string, prompt: string, draft
 }
 
 function normalizeText(value: unknown) { return String(value ?? '').trim().replace(/\s+/g, ' ').toUpperCase() }
-function normalizeExtraction(extracted: any, reviewOverrides: boolean[] = []) {
-  const lines: ExtractedLine[] = Array.isArray(extracted?.lines) ? extracted.lines.map((line: ExtractedLine, index: number) => {
-    const needsReview = reviewOverrides[index] ?? Boolean(line?.needsReview)
+function normalizeExtraction(extracted: any, reviewFields: Set<string> = new Set()) {
+  const lines: ExtractedLine[] = Array.isArray(extracted?.lines) ? extracted.lines.map((line: any, index: number) => {
+    const fields = ['description', 'itemNumber', 'location', 'quantity']
+    const needsReview = fields.some((field) => reviewFields.has(`${index}:${field}`))
     const raw = Math.max(0, Math.min(1, Number(line?.ocrConfidence) || 0))
     return {
       description: String(line?.description || ''), itemNumber: String(line?.itemNumber || ''), location: String(line?.location || ''), quantity: String(line?.quantity || ''),
@@ -74,9 +67,7 @@ function normalizeExtraction(extracted: any, reviewOverrides: boolean[] = []) {
   return { costCenter: String(extracted?.costCenter || ''), afe: String(extracted?.afe || ''), transactionType: ['Miscellaneous Issue','Issue to Project','Inventory Transfer','Issue to Conversion'].includes(extracted?.transactionType) ? extracted.transactionType : '', remarks: String(extracted?.remarks || ''), receivedReturnedBy: String(extracted?.receivedReturnedBy || ''), preparedBy: String(extracted?.preparedBy || ''), approvedBy: String(extracted?.approvedBy || ''), lines }
 }
 
-function lineSignature(line: any) {
-  return [line?.description, line?.itemNumber, line?.location, line?.quantity].map(normalizeText).join('|')
-}
+function normalizedField(line: any, field: string) { return normalizeText(line?.[field]) }
 
 export async function POST(request: Request) {
   try {
@@ -88,22 +79,26 @@ export async function POST(request: Request) {
     if (file.size === 0 || file.size > MAX_FILE_SIZE) return NextResponse.json({ error: 'The stock sheet photo must be between 1 byte and 10 MB.' }, { status: 400 })
     const bytes = Buffer.from(await file.arrayBuffer()); const dataUrl = `data:${file.type};base64,${bytes.toString('base64')}`
 
-    const firstPass = await callVision(apiKey, dataUrl, basePrompt)
+    const firstPass = await callVision(apiKey, dataUrl, extractionPrompt)
     let finalPass = firstPass
-    let disagreement: boolean[] = []
+    const reviewFields = new Set<string>()
     try {
-      finalPass = await callVision(apiKey, dataUrl, verificationPrompt, JSON.stringify(firstPass))
+      finalPass = await callVision(apiKey, dataUrl, verificationPrompt)
       const firstLines = Array.isArray(firstPass?.lines) ? firstPass.lines : []
-      const finalLines = Array.isArray(finalPass?.lines) ? finalPass.lines : []
-      const count = Math.max(firstLines.length, finalLines.length)
-      disagreement = Array.from({ length: count }, (_, index) => lineSignature(firstLines[index]) !== lineSignature(finalLines[index]))
-      for (let i = 0; i < finalLines.length; i++) {
-        finalLines[i].needsReview = Boolean(disagreement[i]) || Boolean(firstLines[i]?.needsReview) || Boolean(finalLines[i]?.needsReview)
+      const secondLines = Array.isArray(finalPass?.lines) ? finalPass.lines : []
+      const count = Math.max(firstLines.length, secondLines.length)
+      for (let i = 0; i < count; i++) {
+        const a = firstLines[i]; const b = secondLines[i]
+        if (!a || !b) { ['description','itemNumber','location','quantity'].forEach((field) => reviewFields.add(`${i}:${field}`)); continue }
+        for (const field of ['description','itemNumber','location','quantity']) {
+          if (normalizedField(a, field) !== normalizedField(b, field)) reviewFields.add(`${i}:${field}`)
+        }
       }
-      finalPass.lines = finalLines
-    } catch (error) { console.error('Second-pass handwriting verification failed; using first pass', error) }
+      // Prefer the verification reading as the final transcription, but review only fields where the two independent readings disagree.
+      finalPass.lines = secondLines
+    } catch (error) { console.error('Second independent handwriting verification failed; using first pass', error) }
 
-    return NextResponse.json({ ...normalizeExtraction(finalPass, disagreement.length ? disagreement : undefined), ocrSource: 'openai-vision-stores-issue-two-pass-agreement' })
+    return NextResponse.json({ ...normalizeExtraction(finalPass, reviewFields), ocrSource: 'openai-vision-independent-two-pass-field-agreement' })
   } catch (error) {
     console.error('Handwriting extraction error', error); const message = error instanceof Error ? error.message : ''
     if (message.includes('OpenAI extraction')) return NextResponse.json({ error: 'The handwriting reader could not reliably process this photo. Try a clearer, straight-on photo.' }, { status: 502 })
